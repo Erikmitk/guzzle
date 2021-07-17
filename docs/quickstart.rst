@@ -28,7 +28,7 @@ Creating a Client
         'timeout'  => 2.0,
     ]);
 
-Clients are immutable in Guzzle 6, which means that you cannot change the defaults used by a client after it's created.
+Clients are immutable in Guzzle, which means that you cannot change the defaults used by a client after it's created.
 
 The client constructor accepts an associative array of options:
 
@@ -185,14 +185,14 @@ requests.
 
     // Wait for the requests to complete; throws a ConnectException
     // if any of the requests fail
-    $responses = Promise\unwrap($promises);
+    $responses = Promise\Utils::unwrap($promises);
     
     // You can access each response using the key of the promise
     echo $responses['image']->getHeader('Content-Length')[0];
     echo $responses['png']->getHeader('Content-Length')[0];
 
     // Wait for the requests to complete, even if some of them fail
-    $responses = Promise\settle($promises)->wait();
+    $responses = Promise\Utils::settle($promises)->wait();
 
     // Values returned above are wrapped in an array with 2 keys: "state" (either fulfilled or rejected) and "value" (contains the response)
     echo $responses['image']['state']; // returns "fulfilled"
@@ -342,17 +342,19 @@ resource returned from ``fopen``, or an instance of a
 
 .. code-block:: php
 
+    use GuzzleHttp\Psr7;
+
     // Provide the body as a string.
     $r = $client->request('POST', 'http://httpbin.org/post', [
         'body' => 'raw data'
     ]);
 
     // Provide an fopen resource.
-    $body = fopen('/path/to/file', 'r');
+    $body = Psr7\Utils::tryFopen('/path/to/file', 'r');
     $r = $client->request('POST', 'http://httpbin.org/post', ['body' => $body]);
 
-    // Use the stream_for() function to create a PSR-7 stream.
-    $body = \GuzzleHttp\Psr7\stream_for('hello!');
+    // Use the Utils::streamFor method to create a PSR-7 stream.
+    $body = Psr7\Utils::streamFor('hello!');
     $r = $client->request('POST', 'http://httpbin.org/post', ['body' => $body]);
 
 An easy way to upload JSON data and set the appropriate header is using the
@@ -406,6 +408,8 @@ associative arrays, where each associative array contains the following keys:
 
 .. code-block:: php
 
+    use GuzzleHttp\Psr7;
+
     $response = $client->request('POST', 'http://httpbin.org/post', [
         'multipart' => [
             [
@@ -414,7 +418,7 @@ associative arrays, where each associative array contains the following keys:
             ],
             [
                 'name'     => 'file_name',
-                'contents' => fopen('/path/to/file', 'r')
+                'contents' => Psr7\Utils::tryFopen('/path/to/file', 'r')
             ],
             [
                 'name'     => 'other_file',
@@ -534,11 +538,11 @@ on each other.
 
     . \RuntimeException
     └── TransferException (implements GuzzleException)
+        ├── ConnectException (implements NetworkExceptionInterface)
         └── RequestException
             ├── BadResponseException
             │   ├── ServerException
             │   └── ClientException
-            ├── ConnectException
             └── TooManyRedirectsException
 
 Guzzle throws exceptions for errors that occur during a transfer.
@@ -557,15 +561,15 @@ Guzzle throws exceptions for errors that occur during a transfer.
       try {
           $client->request('GET', 'https://github.com/_abc_123_404');
       } catch (RequestException $e) {
-          echo Psr7\str($e->getRequest());
+          echo Psr7\Message::toString($e->getRequest());
           if ($e->hasResponse()) {
-              echo Psr7\str($e->getResponse());
+              echo Psr7\Message::toString($e->getResponse());
           }
       }
 
 - A ``GuzzleHttp\Exception\ConnectException`` exception is thrown in the
   event of a networking error. This exception extends from
-  ``GuzzleHttp\Exception\RequestException``.
+  ``GuzzleHttp\Exception\TransferException``.
 
 - A ``GuzzleHttp\Exception\ClientException`` is thrown for 400
   level errors if the ``http_errors`` request option is set to true. This
@@ -581,8 +585,8 @@ Guzzle throws exceptions for errors that occur during a transfer.
       try {
           $client->request('GET', 'https://github.com/_abc_123_404');
       } catch (ClientException $e) {
-          echo Psr7\str($e->getRequest());
-          echo Psr7\str($e->getResponse());
+          echo Psr7\Message::toString($e->getRequest());
+          echo Psr7\Message::toString($e->getResponse());
       }
 
 - A ``GuzzleHttp\Exception\ServerException`` is thrown for 500 level

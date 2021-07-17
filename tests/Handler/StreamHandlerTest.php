@@ -3,6 +3,7 @@
 namespace GuzzleHttp\Test\Handler;
 
 use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\Handler\StreamHandler;
 use GuzzleHttp\Psr7;
 use GuzzleHttp\Psr7\FnStream;
@@ -55,7 +56,7 @@ class StreamHandlerTest extends TestCase
     {
         $handler = new StreamHandler();
 
-        $this->expectException(\GuzzleHttp\Exception\ConnectException::class);
+        $this->expectException(ConnectException::class);
         $handler(
             new Request('GET', 'http://localhost:123'),
             ['timeout' => 0.01]
@@ -200,6 +201,24 @@ class StreamHandlerTest extends TestCase
         self::assertTrue(!$response->hasHeader('content-length') || $response->getHeaderLine('content-length') == $response->getBody()->getSize());
     }
 
+    public function testAutomaticallyDecompressGzipHead()
+    {
+        Server::flush();
+        $content = \gzencode('test');
+        Server::enqueue([
+            new Response(200, [
+                'Content-Encoding' => 'gzip',
+                'Content-Length'   => \strlen($content),
+            ], $content)
+        ]);
+        $handler = new StreamHandler();
+        $request = new Request('HEAD', Server::$url);
+        $response = $handler($request, ['decode_content' => true])->wait();
+
+        // Verify that the content-length matches the encoded size.
+        self::assertTrue(!$response->hasHeader('content-length') || $response->getHeaderLine('content-length') == \strlen($content));
+    }
+
     public function testReportsOriginalSizeAndContentEncodingAfterDecoding()
     {
         Server::flush();
@@ -262,7 +281,7 @@ class StreamHandlerTest extends TestCase
 
     public function testAddsProxy()
     {
-        $this->expectException(\GuzzleHttp\Exception\ConnectException::class);
+        $this->expectException(ConnectException::class);
         $this->expectExceptionMessage('Connection refused');
 
         $this->getSendResult(['proxy' => '127.0.0.1:8125']);
@@ -270,23 +289,39 @@ class StreamHandlerTest extends TestCase
 
     public function testAddsProxyByProtocol()
     {
-        $url = \str_replace('http', 'tcp', Server::$url);
-        // Workaround until #1823 is fixed properly
-        $url = \rtrim($url, '/');
+        $url = Server::$url;
         $res = $this->getSendResult(['proxy' => ['http' => $url]]);
         $opts = \stream_context_get_options($res->getBody()->detach());
-        self::assertSame($url, $opts['http']['proxy']);
+
+        foreach ([\PHP_URL_HOST, \PHP_URL_PORT] as $part) {
+            self::assertSame(parse_url($url, $part), parse_url($opts['http']['proxy'], $part));
+        }
     }
 
     public function testAddsProxyButHonorsNoProxy()
     {
-        $url = \str_replace('http', 'tcp', Server::$url);
+        $url = Server::$url;
         $res = $this->getSendResult(['proxy' => [
             'http' => $url,
             'no'   => ['*']
         ]]);
         $opts = \stream_context_get_options($res->getBody()->detach());
         self::assertArrayNotHasKey('proxy', $opts['http']);
+    }
+
+    public function testUsesProxy()
+    {
+        $this->queueRes();
+        $handler = new StreamHandler();
+        $request = new Request('GET', 'http://www.example.com', [], null, '1.0');
+        $response = $handler($request, [
+            'proxy' => Server::$url
+        ])->wait();
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame('OK', $response->getReasonPhrase());
+        self::assertSame('Bar', $response->getHeaderLine('Foo'));
+        self::assertSame('8', $response->getHeaderLine('Content-Length'));
+        self::assertSame('hi there', (string) $response->getBody());
     }
 
     public function testAddsTimeout()
@@ -298,7 +333,7 @@ class StreamHandlerTest extends TestCase
 
     public function testVerifiesVerifyIsValidIfPath()
     {
-        $this->expectException(\GuzzleHttp\Exception\RequestException::class);
+        $this->expectException(RequestException::class);
         $this->expectExceptionMessage('SSL CA bundle not found: /does/not/exist');
 
         $this->getSendResult(['verify' => '/does/not/exist']);
@@ -307,12 +342,12 @@ class StreamHandlerTest extends TestCase
     public function testVerifyCanBeDisabled()
     {
         $handler = $this->getSendResult(['verify' => false]);
-        self::assertInstanceOf(\GuzzleHttp\Psr7\Response::class, $handler);
+        self::assertInstanceOf(Response::class, $handler);
     }
 
     public function testVerifiesCertIfValidPath()
     {
-        $this->expectException(\GuzzleHttp\Exception\RequestException::class);
+        $this->expectException(RequestException::class);
         $this->expectExceptionMessage('SSL certificate not found: /does/not/exist');
 
         $this->getSendResult(['cert' => '/does/not/exist']);
@@ -527,7 +562,7 @@ class StreamHandlerTest extends TestCase
             }
         ]);
 
-        $this->expectException(\GuzzleHttp\Exception\RequestException::class);
+        $this->expectException(RequestException::class);
         $this->expectExceptionMessage('An error was encountered during the on_headers event');
         $promise->wait();
     }
@@ -541,7 +576,7 @@ class StreamHandlerTest extends TestCase
         $req = new Request('GET', Server::$url);
         $got = null;
 
-        $stream = Psr7\stream_for();
+        $stream = Psr7\Utils::streamFor();
         $stream = FnStream::decorate($stream, [
             'write' => static function ($data) use ($stream, &$got) {
                 self::assertNotNull($got);
@@ -672,5 +707,35 @@ class StreamHandlerTest extends TestCase
         self::assertFalse($line);
         self::assertTrue(\stream_get_meta_data($body)['timed_out']);
         self::assertFalse(\feof($body));
+    }
+
+    public function testHandlesGarbageHttpServerGracefully()
+    {
+        $handler = new StreamHandler();
+
+        $this->expectException(RequestException::class);
+        $this->expectExceptionMessage('An error was encountered while creating the response');
+
+        $handler(
+            new Request('GET', Server::$url . 'guzzle-server/garbage'),
+            [
+                RequestOptions::STREAM => true,
+            ]
+        )->wait();
+    }
+
+    public function testHandlesInvalidStatusCodeGracefully()
+    {
+        $handler = new StreamHandler();
+
+        $this->expectException(RequestException::class);
+        $this->expectExceptionMessage('An error was encountered while creating the response');
+
+        $handler(
+            new Request('GET', Server::$url . 'guzzle-server/bad-status'),
+            [
+                RequestOptions::STREAM => true,
+            ]
+        )->wait();
     }
 }

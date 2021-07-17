@@ -2,13 +2,17 @@
 
 namespace GuzzleHttp\Tests;
 
+use GuzzleHttp\BodySummarizer;
 use GuzzleHttp\Cookie\CookieJar;
 use GuzzleHttp\Cookie\SetCookie;
+use GuzzleHttp\Exception\ClientException;
 use GuzzleHttp\Exception\RequestException;
+use GuzzleHttp\Exception\ServerException;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\MessageFormatter;
 use GuzzleHttp\Middleware;
+use GuzzleHttp\Promise as P;
 use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
@@ -44,24 +48,39 @@ class MiddlewareTest extends TestCase
     public function testThrowsExceptionOnHttpClientError()
     {
         $m = Middleware::httpErrors();
-        $h = new MockHandler([new Response(404)]);
+        $h = new MockHandler([new Response(400, [], str_repeat('a', 1000))]);
         $f = $m($h);
         $p = $f(new Request('GET', 'http://foo.com'), ['http_errors' => true]);
-        self::assertSame('pending', $p->getState());
+        self::assertTrue(P\Is::pending($p));
 
-        $this->expectException(\GuzzleHttp\Exception\ClientException::class);
+        $this->expectException(ClientException::class);
+        $this->expectExceptionMessage(\sprintf("Client error: `GET http://foo.com` resulted in a `400 Bad Request` response:\n%s (truncated...)", str_repeat('a', 120)));
+        $p->wait();
+    }
+
+    public function testThrowsExceptionOnHttpClientErrorLongBody()
+    {
+        $m = Middleware::httpErrors(new BodySummarizer(200));
+        $h = new MockHandler([new Response(404, [], str_repeat('b', 1000))]);
+        $f = $m($h);
+        $p = $f(new Request('GET', 'http://foo.com'), ['http_errors' => true]);
+        self::assertTrue(P\Is::pending($p));
+
+        $this->expectException(ClientException::class);
+        $this->expectExceptionMessage(\sprintf("Client error: `GET http://foo.com` resulted in a `404 Not Found` response:\n%s (truncated...)", str_repeat('b', 200)));
         $p->wait();
     }
 
     public function testThrowsExceptionOnHttpServerError()
     {
         $m = Middleware::httpErrors();
-        $h = new MockHandler([new Response(500)]);
+        $h = new MockHandler([new Response(500, [], 'Oh no!')]);
         $f = $m($h);
         $p = $f(new Request('GET', 'http://foo.com'), ['http_errors' => true]);
-        self::assertSame('pending', $p->getState());
+        self::assertTrue(P\Is::pending($p));
 
-        $this->expectException(\GuzzleHttp\Exception\ServerException::class);
+        $this->expectException(ServerException::class);
+        $this->expectExceptionMessage("GET http://foo.com` resulted in a `500 Internal Server Error` response:\nOh no!");
         $p->wait();
     }
 
@@ -225,7 +244,7 @@ class MiddlewareTest extends TestCase
 
     public function testLogsWithStringError()
     {
-        $h = new MockHandler([\GuzzleHttp\Promise\rejection_for('some problem')]);
+        $h = new MockHandler([P\Create::rejectionFor('some problem')]);
         $stack = new HandlerStack($h);
         $logger = new TestLogger();
         $formatter = new MessageFormatter('{error}');
